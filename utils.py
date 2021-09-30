@@ -11,6 +11,7 @@ import random
 from sklearn.model_selection import train_test_split, KFold
 from sklearn.linear_model import Ridge
 import scipy
+import time
 
 """
 Network 
@@ -68,7 +69,7 @@ def dropout(X, i):
     X_change = torch.tensor(X_change, dtype=torch.float32)
     return X_change
 
-def retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, exp_name, tol=1e-5):
+def retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=1e-5):
     retrain_nn = NN4vi(p, hidden_layers, 1)
     #tb_logger = pl.loggers.TensorBoardLogger('logs/{}'.format(exp_name), name='retrain_{}'.format(j))
     early_stopping = EarlyStopping('val_loss', min_delta=tol)
@@ -168,3 +169,64 @@ def lazy_train_cv(full_nn, X_train_change, X_test_change, y_train, hidden_layers
     lazy_pred_train, lazy_pred_test = lazy_predict(grads, flat_params, full_nn, hidden_layers, shape_info,
                                                    X_train_change, y_train, X_test_change, lam)
     return lazy_pred_train, lazy_pred_test, errors
+
+
+"""
+Experiment wrapped for faster simulations
+"""
+
+def vi_experiment_wrapper(X, y, network_width, ix=None, lambda_path=np.logspace(0, 2, 10)):
+    n, p = X.shape
+    if ix is None:
+        ix = np.arange(p)
+    hidden_layers = [network_width]
+    tol = 1e-3
+    results = []
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.33, random_state = 1)
+    trainset = torch.utils.data.TensorDataset(torch.tensor(X_train, dtype=torch.float32),
+                                              torch.tensor(y_train, dtype=torch.float32).view(-1,1))
+    train_loader = DataLoader(trainset, batch_size=256)
+
+    full_nn = NN4vi(p, hidden_layers, 1)
+    early_stopping = EarlyStopping('val_loss', min_delta=tol)
+    trainer = pl.Trainer(callbacks=[early_stopping])
+    t0 = time.time()
+    trainer.fit(full_nn, train_loader, train_loader)
+    full_time = time.time() - t0
+    full_pred_test = full_nn(X_test)
+    results.append(['all', 'full model', full_time, 0,
+                    nn.MSELoss()(full_nn(X_train), y_train).item(),
+                    nn.MSELoss()(full_pred_test, y_test).item()])
+    for j in ix:
+        varr = 'X' + str(j + 1)
+        # DROPOUT
+        X_test_change = dropout(X_test, j)
+        X_train_change = dropout(X_train, j)
+        dr_pred_train = full_nn(X_train_change)
+        dr_pred_test = full_nn(X_test_change)
+        dr_train_loss = nn.MSELoss()(dr_pred_train, y_train).item()
+        dr_test_loss = nn.MSELoss()(dr_pred_test, y_test).item()
+        dr_vi = nn.MSELoss()(dr_pred_test, y_test).item() - nn.MSELoss()(full_pred_test, y_test).item()
+        results.append([varr, 'dropout', 0, dr_vi, dr_train_loss, dr_test_loss])
+
+        # LAZY
+        t0 = time.time()
+        lazy_pred_train, lazy_pred_test, cv_res = lazy_train_cv(full_nn, X_train_change, X_test_change, y_train,
+                                                             hidden_layers, lam_path = lambda_path)
+        lazy_time = time.time() - t0
+        lazy_train_loss = nn.MSELoss()(lazy_pred_train, y_train).item()
+        lazy_test_loss = nn.MSELoss()(lazy_pred_test, y_test).item()
+        lazy_vi = nn.MSELoss()(lazy_pred_test, y_test).item() - nn.MSELoss()(full_pred_test, y_test).item()
+        results.append([varr, 'lazy', lazy_time, lazy_vi, lazy_train_loss, lazy_test_loss])
+
+        # RETRAIN
+        t0 = time.time()
+        retrain_pred_train, retrain_pred_test = retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=tol)
+        retrain_time = time.time() - t0
+        vi_retrain = nn.MSELoss()(retrain_pred_test, y_test).item() - nn.MSELoss()(y_test, full_pred_test).item()
+        loss_rt_test = nn.MSELoss()(retrain_pred_test, y_test).item()
+        loss_rt_train = nn.MSELoss()(retrain_pred_train, y_train).item()
+        results.append([varr, 'retrain', retrain_time, vi_retrain, loss_rt_train, loss_rt_test])
+
+    df = pd.DataFrame(results, columns=['variable', 'method', 'time', 'vi', 'train_loss', 'test_loss'])
+    return df

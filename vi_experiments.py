@@ -28,18 +28,25 @@ seed = 1
 p = len(beta)
 hidden_layers = [args.width]
 corr = args.corr
-tol = 1e-3
-ix = [0,1,2,3,4,5]
+tol = 1e-2
+ix = [0,1,2,3]
 
-exp_name = '{}_width{}_corr{}_tol{}_iter{}'.format(args.data, args.width, args.corr, tol, args.niter)
+exp_name = '{}_width{}_corr{}_ix{}_iter{}'.format(args.data, args.width, args.corr, '|'.join([str(x) for x in ix]), args.niter)
 
 results = []
 cv_results = pd.DataFrame()
+
+if args.data == '2lnn':
+    # generate weights up front for all sims
+    W, V = generate_WV(beta, 12)
+
 for t in tqdm.tqdm(np.arange(args.niter)):
     if args.data == 'linear':
         X, y = generate_linear_data(beta, N=N, seed=t, corr=corr)
     elif args.data == 'logistic':
         X, y = generate_logistic_data(beta, N=N, seed=t, corr=corr)
+    elif args.data == '2lnn':
+        X, y = generate_2lnn_data(W, V, N, corr=corr)
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.33, random_state = 1)
     trainset = torch.utils.data.TensorDataset(torch.tensor(X_train, dtype=torch.float32),
@@ -73,7 +80,7 @@ for t in tqdm.tqdm(np.arange(args.niter)):
         # LAZY
         t0 = time.time()
         lazy_pred_train, lazy_pred_test, cv_res = lazy_train_cv(full_nn, X_train_change, X_test_change, y_train,
-                                                             hidden_layers, lam_path = np.logspace(0, 2, 20))
+                                                             hidden_layers, lam_path = np.logspace(0, 2, 10))
         lazy_time = time.time() - t0
         lazy_train_loss = nn.MSELoss()(lazy_pred_train, y_train).item()
         lazy_test_loss = nn.MSELoss()(lazy_pred_test, y_test).item()
@@ -85,7 +92,7 @@ for t in tqdm.tqdm(np.arange(args.niter)):
 
         # RETRAIN
         t0 = time.time()
-        retrain_pred_train, retrain_pred_test = retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, exp_name, tol=tol)
+        retrain_pred_train, retrain_pred_test = retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=tol)
         retrain_time = time.time() - t0
         vi_retrain = nn.MSELoss()(retrain_pred_test, y_test).item() - nn.MSELoss()(y_test, full_pred_test).item()
         loss_rt_test = nn.MSELoss()(retrain_pred_test, y_test).item()
