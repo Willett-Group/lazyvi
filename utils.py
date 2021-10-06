@@ -12,6 +12,7 @@ from sklearn.model_selection import train_test_split, KFold
 from sklearn.linear_model import Ridge
 import scipy
 import time
+import io
 
 """
 Network 
@@ -175,14 +176,14 @@ def lazy_train_cv(full_nn, X_train_change, X_test_change, y_train, hidden_layers
 Experiment wrapped for faster simulations
 """
 
-def vi_experiment_wrapper(X, y, network_width, ix=None, lambda_path=np.logspace(0, 2, 10)):
+def vi_experiment_wrapper(X, y, network_width,  ix=None, exp_iter=1, lambda_path=np.logspace(0, 2, 10), lazy_init='train'):
     n, p = X.shape
     if ix is None:
         ix = np.arange(p)
     hidden_layers = [network_width]
     tol = 1e-3
     results = []
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.33, random_state = 1)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.33, random_state = exp_iter)
     trainset = torch.utils.data.TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                               torch.tensor(y_train, dtype=torch.float32).view(-1,1))
     train_loader = DataLoader(trainset, batch_size=256)
@@ -218,6 +219,17 @@ def vi_experiment_wrapper(X, y, network_width, ix=None, lambda_path=np.logspace(
         lazy_test_loss = nn.MSELoss()(lazy_pred_test, y_test).item()
         lazy_vi = nn.MSELoss()(lazy_pred_test, y_test).item() - nn.MSELoss()(full_pred_test, y_test).item()
         results.append([varr, 'lazy', lazy_time, lazy_vi, lazy_train_loss, lazy_test_loss])
+
+        # LAZY
+        if lazy_init == 'random':
+            t0 = time.time()
+            lazy_pred_train, lazy_pred_test, cv_res = lazy_train_cv(NN4vi(p, hidden_layers, 1), X_train_change, X_test_change, y_train,
+                                                                 hidden_layers, lam_path = lambda_path)
+            lazy_time = time.time() - t0
+            lazy_train_loss = nn.MSELoss()(lazy_pred_train, y_train).item()
+            lazy_test_loss = nn.MSELoss()(lazy_pred_test, y_test).item()
+            lazy_vi = nn.MSELoss()(lazy_pred_test, y_test).item() - nn.MSELoss()(full_pred_test, y_test).item()
+            results.append([varr, 'lazy_random', lazy_time, lazy_vi, lazy_train_loss, lazy_test_loss])
 
         # RETRAIN
         t0 = time.time()
