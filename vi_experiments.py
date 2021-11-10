@@ -18,11 +18,14 @@ parser.add_argument('--width', type=int, default=12)
 parser.add_argument('--niter', type=int, default=1)
 parser.add_argument('--corr', type=float, default=0.5)
 parser.add_argument('--data', type=str, default='linear')
+parser.add_argument('--loglamax', type=int, default=2)
+parser.add_argument('--sigma', type=float, default=.1)
+parser.add_argument('--nlam', type=int, default=10)
 args = parser.parse_args()
 
 
 beta = [1.5, 1.2, 1, 0, 0, 0]
-sigma = 0.1
+sigma = args.sigma
 N = 5000
 seed = 1
 p = len(beta)
@@ -31,7 +34,9 @@ corr = args.corr
 tol = 1e-2
 ix = [0,1,2,3]
 
-exp_name = '{}_width{}_corr{}_ix{}_iter{}'.format(args.data, args.width, args.corr, '|'.join([str(x) for x in ix]), args.niter)
+exp_name = '{}_width{}_corr{}_sigma{}_ix{}_iter{}_lamax{}_nlam{}'.format(args.data, args.width, args.corr, args.sigma,
+                                                                  '|'.join([str(x) for x in ix]), args.niter,
+                                                                         args.loglamax, args.nlam)
 
 results = []
 cv_results = pd.DataFrame()
@@ -42,9 +47,9 @@ if args.data == '2lnn':
 
 for t in tqdm.tqdm(np.arange(args.niter)):
     if args.data == 'linear':
-        X, y = generate_linear_data(beta, N=N, seed=t, corr=corr)
+        X, y = generate_linear_data(beta, sigma=sigma, N=N, seed=t, corr=corr)
     elif args.data == 'logistic':
-        X, y = generate_logistic_data(beta, N=N, seed=t, corr=corr)
+        X, y = generate_logistic_data(np.array(beta)*10, sigma=sigma, N=N, seed=t, corr=corr)
     elif args.data == '2lnn':
         X, y = generate_2lnn_data(W, V, N, corr=corr)
 
@@ -80,7 +85,7 @@ for t in tqdm.tqdm(np.arange(args.niter)):
         # LAZY
         t0 = time.time()
         lazy_pred_train, lazy_pred_test, cv_res = lazy_train_cv(full_nn, X_train_change, X_test_change, y_train,
-                                                             hidden_layers, lam_path = np.logspace(0, 2, 10))
+                                                             hidden_layers, lam_path = np.logspace(0, args.loglamax, args.nlam))
         lazy_time = time.time() - t0
         lazy_train_loss = nn.MSELoss()(lazy_pred_train, y_train).item()
         lazy_test_loss = nn.MSELoss()(lazy_pred_test, y_test).item()

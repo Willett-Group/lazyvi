@@ -60,3 +60,15 @@ def generate_2lnn_data(W, V, n, corr=0.5):
     Y = torch.tensor(torch.matmul(V, torch.relu(torch.matmul(W, X.T))).detach().numpy(),
                      dtype=torch.float32)
     return X, Y.reshape(-1, 1)
+
+
+def generate_non_additive_6(n=5000, rho=.5):
+    p = 6
+    sigma = np.eye(p)
+    sigma[0, 1] = rho
+    sigma[1, 0] = rho
+    X = np.random.multivariate_normal(np.zeros(p), sigma, size=n)
+    Y = X[:,0]*np.sin(X[:,1]+2*X[:,2])*np.cos(X[:,3]+2*X[:,4])
+    X = torch.tensor(X, dtype=torch.float32)
+    Y = torch.tensor(Y, dtype=torch.float32).reshape(-1,1)
+    return X, Y

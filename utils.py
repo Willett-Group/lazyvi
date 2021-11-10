@@ -10,9 +10,9 @@ import pandas as pd
 import random
 from sklearn.model_selection import train_test_split, KFold
 from sklearn.linear_model import Ridge
-import scipy
+from scipy import stats as st
 import time
-import io
+from IPython.utils import io
 
 """
 Network 
@@ -61,6 +61,14 @@ class NN4vi(pl.LightningModule):
 """
 VI helpers
 """
+def calculate_cvg(est, se, true_vi, level=.05):
+    z = st.norm.ppf((1-level/2))
+    lb = est - z*se
+    ub = est + z*se
+    if true_vi >= lb and true_vi <= ub:
+        return 1
+    else:
+        return 0
 
 def dropout(X, i):
     X = np.array(X)
@@ -80,7 +88,7 @@ def retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=1e-
     train_loader = DataLoader(trainset, batch_size=256)
 
     trainer = pl.Trainer(callbacks=[early_stopping], max_epochs=10000)
-    trainer.fit(retrain_nn, train_loader, train_loader)
+    with io.capture_output() as captured: trainer.fit(retrain_nn, train_loader, train_loader)
 
     retrain_pred_train = retrain_nn(X_train_change)
     retrain_pred_test = retrain_nn(X_test_change)
@@ -145,7 +153,6 @@ def lazy_predict(grads, flat_params, full_nn, hidden_layers, shape_info, X_train
         param.data = lazy_retrain_Tlist[k]
     lazy_pred_train = lazy_retrain_nn(X_train)
     lazy_pred_test = lazy_retrain_nn(X_test)
-
     return lazy_pred_train, lazy_pred_test
 
 
@@ -176,7 +183,8 @@ def lazy_train_cv(full_nn, X_train_change, X_test_change, y_train, hidden_layers
 Experiment wrapped for faster simulations
 """
 
-def vi_experiment_wrapper(X, y, network_width,  ix=None, exp_iter=1, lambda_path=np.logspace(0, 2, 10), lazy_init='train'):
+def vi_experiment_wrapper(X, y, network_width,  ix=None, exp_iter=1, lambda_path=np.logspace(0, 2, 10),
+                          lam='cv', lazy_init='train', do_retrain=True):
     n, p = X.shape
     if ix is None:
         ix = np.arange(p)
@@ -192,7 +200,7 @@ def vi_experiment_wrapper(X, y, network_width,  ix=None, exp_iter=1, lambda_path
     early_stopping = EarlyStopping('val_loss', min_delta=tol)
     trainer = pl.Trainer(callbacks=[early_stopping])
     t0 = time.time()
-    trainer.fit(full_nn, train_loader, train_loader)
+    with io.capture_output() as captured: trainer.fit(full_nn, train_loader, train_loader)
     full_time = time.time() - t0
     full_pred_test = full_nn(X_test)
     results.append(['all', 'full model', full_time, 0,
@@ -208,22 +216,50 @@ def vi_experiment_wrapper(X, y, network_width,  ix=None, exp_iter=1, lambda_path
         dr_train_loss = nn.MSELoss()(dr_pred_train, y_train).item()
         dr_test_loss = nn.MSELoss()(dr_pred_test, y_test).item()
         dr_vi = nn.MSELoss()(dr_pred_test, y_test).item() - nn.MSELoss()(full_pred_test, y_test).item()
-        results.append([varr, 'dropout', 0, dr_vi, dr_train_loss, dr_test_loss])
+
+        # variance
+        eps_j = ((y_test - dr_pred_test) ** 2).detach().numpy().reshape(1, -1)
+        eps_full = ((y_test - full_pred_test) ** 2).detach().numpy().reshape(1, -1)
+        se = np.sqrt(np.var(eps_j - eps_full)/y_test.shape[0])
+
+
+        results.append([varr, 'dropout', 0, dr_vi, dr_train_loss, dr_test_loss, se])
 
         # LAZY
         t0 = time.time()
-        lazy_pred_train, lazy_pred_test, cv_res = lazy_train_cv(full_nn, X_train_change, X_test_change, y_train,
-                                                             hidden_layers, lam_path = lambda_path)
+
+        if lam == 'cv':
+            lazy_pred_train, lazy_pred_test, cv_res = lazy_train_cv(full_nn, X_train_change, X_test_change, y_train,
+                                                                 hidden_layers, lam_path = lambda_path)
+        else:
+            grads, flat_params, shape_info = extract_grad(X_train_change, full_nn)
+            lazy_pred_train, lazy_pred_test = lazy_predict(grads, flat_params, full_nn, hidden_layers, shape_info,
+                                                           X_train_change, y_train, X_test_change, lam)
         lazy_time = time.time() - t0
         lazy_train_loss = nn.MSELoss()(lazy_pred_train, y_train).item()
         lazy_test_loss = nn.MSELoss()(lazy_pred_test, y_test).item()
         lazy_vi = nn.MSELoss()(lazy_pred_test, y_test).item() - nn.MSELoss()(full_pred_test, y_test).item()
-        results.append([varr, 'lazy', lazy_time, lazy_vi, lazy_train_loss, lazy_test_loss])
+
+        # variance
+        eps_j = ((y_test - lazy_pred_test) ** 2).detach().numpy().reshape(1, -1)
+        eps_full = ((y_test - full_pred_test) ** 2).detach().numpy().reshape(1, -1)
+        se = np.sqrt(np.var(eps_j - eps_full)/y_test.shape[0])
+
+        results.append([varr, 'lazy', lazy_time, lazy_vi, lazy_train_loss, lazy_test_loss, se])
 
         # LAZY
         if lazy_init == 'random':
             t0 = time.time()
-            lazy_pred_train, lazy_pred_test, cv_res = lazy_train_cv(NN4vi(p, hidden_layers, 1), X_train_change, X_test_change, y_train,
+            random_nn = NN4vi(p, hidden_layers, 1)
+            params_full = tuple(full_nn.parameters())
+            flat_params, shape_info = flat_tensors(params_full)
+            lazy_retrain_Tlist = recover_tensors(flat_params.reshape(-1), shape_info)
+            # hidden_layers probably doesn't need to be an argument here - get it from the structure
+            for k, param in enumerate(random_nn.parameters()):
+                param.data = lazy_retrain_Tlist[k] + np.random.normal(size = lazy_retrain_Tlist[k].shape)
+
+
+            lazy_pred_train, lazy_pred_test, cv_res = lazy_train_cv(random_nn, X_train_change, X_test_change, y_train,
                                                                  hidden_layers, lam_path = lambda_path)
             lazy_time = time.time() - t0
             lazy_train_loss = nn.MSELoss()(lazy_pred_train, y_train).item()
@@ -232,13 +268,20 @@ def vi_experiment_wrapper(X, y, network_width,  ix=None, exp_iter=1, lambda_path
             results.append([varr, 'lazy_random', lazy_time, lazy_vi, lazy_train_loss, lazy_test_loss])
 
         # RETRAIN
-        t0 = time.time()
-        retrain_pred_train, retrain_pred_test = retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=tol)
-        retrain_time = time.time() - t0
-        vi_retrain = nn.MSELoss()(retrain_pred_test, y_test).item() - nn.MSELoss()(y_test, full_pred_test).item()
-        loss_rt_test = nn.MSELoss()(retrain_pred_test, y_test).item()
-        loss_rt_train = nn.MSELoss()(retrain_pred_train, y_train).item()
-        results.append([varr, 'retrain', retrain_time, vi_retrain, loss_rt_train, loss_rt_test])
+        if do_retrain:
+            t0 = time.time()
+            retrain_pred_train, retrain_pred_test = retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=tol)
+            retrain_time = time.time() - t0
+            vi_retrain = nn.MSELoss()(retrain_pred_test, y_test).item() - nn.MSELoss()(y_test, full_pred_test).item()
+            loss_rt_test = nn.MSELoss()(retrain_pred_test, y_test).item()
+            loss_rt_train = nn.MSELoss()(retrain_pred_train, y_train).item()
 
-    df = pd.DataFrame(results, columns=['variable', 'method', 'time', 'vi', 'train_loss', 'test_loss'])
+            # variance
+            eps_j = ((y_test - retrain_pred_test) ** 2).detach().numpy().reshape(1, -1)
+            eps_full = ((y_test - full_pred_test) ** 2).detach().numpy().reshape(1, -1)
+            se = np.sqrt(np.var(eps_j - eps_full)/y_test.shape[0])
+
+            results.append([varr, 'retrain', retrain_time, vi_retrain, loss_rt_train, loss_rt_test, se])
+
+    df = pd.DataFrame(results, columns=['variable', 'method', 'time', 'vi', 'train_loss', 'test_loss', 'se'])
     return df
