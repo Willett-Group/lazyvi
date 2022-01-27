@@ -9,10 +9,14 @@ import numpy as np
 import pandas as pd
 import random
 from sklearn.model_selection import train_test_split, KFold
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, LinearRegression
+from sklearn.metrics import mean_squared_error as mse
 from scipy import stats as st
 import time
 from IPython.utils import io
+from sklearn.ensemble import RandomForestRegressor
+import tqdm
+
 
 """
 Network 
@@ -49,6 +53,7 @@ class NN4vi(pl.LightningModule):
         y_hat = self.net(x)
         loss = nn.MSELoss()(y_hat, y)
         # Logging to TensorBoard by default
+        self.log("my_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def validation_step(self, batch, batch_nb):
@@ -56,6 +61,8 @@ class NN4vi(pl.LightningModule):
         loss = nn.MSELoss()(self.net(x), y)
         self.log('val_loss', loss)
         return loss
+
+
 
 
 """
@@ -70,15 +77,19 @@ def calculate_cvg(est, se, true_vi, level=.05):
     else:
         return 0
 
-def dropout(X, i):
+def dropout(X, grp):
     X = np.array(X)
     N = X.shape[0]
     X_change = np.copy(X)
-    X_change[:, i] = np.ones(N) * np.mean(X[:, i])
+    if type(grp)==int:
+        X_change[:, grp] = np.ones(N) * np.mean(X[:, grp])
+    else:
+        for j in grp:
+            X_change[:, j] = np.ones(N) * np.mean(X[:, j])
     X_change = torch.tensor(X_change, dtype=torch.float32)
     return X_change
 
-def retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=1e-5):
+def retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=1e-3):
     retrain_nn = NN4vi(p, hidden_layers, 1)
     #tb_logger = pl.loggers.TensorBoardLogger('logs/{}'.format(exp_name), name='retrain_{}'.format(j))
     early_stopping = EarlyStopping('val_loss', min_delta=tol)
@@ -88,6 +99,23 @@ def retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=1e-
     train_loader = DataLoader(trainset, batch_size=256)
 
     trainer = pl.Trainer(callbacks=[early_stopping], max_epochs=10000)
+    with io.capture_output() as captured: trainer.fit(retrain_nn, train_loader, train_loader)
+
+    retrain_pred_train = retrain_nn(X_train_change)
+    retrain_pred_test = retrain_nn(X_test_change)
+    return retrain_pred_train, retrain_pred_test
+
+def fake_retrain(p, full_nn, hidden_layers, j, X_train_change, y_train, X_test_change, tol=1e-5, max_epochs=10):
+    retrain_nn = NN4vi(p, hidden_layers, 1)
+    retrain_nn.load_state_dict(full_nn.state_dict()) # take trained model
+    #tb_logger = pl.loggers.TensorBoardLogger('logs/{}'.format(exp_name), name='retrain_{}'.format(j))
+    early_stopping = EarlyStopping('val_loss', min_delta=tol)
+
+    trainset = torch.utils.data.TensorDataset(torch.tensor(X_train_change, dtype=torch.float32),
+                                              torch.tensor(y_train, dtype=torch.float32).view(-1, 1))
+    train_loader = DataLoader(trainset, batch_size=256)
+
+    trainer = pl.Trainer(callbacks=[early_stopping], max_epochs=max_epochs)
     with io.capture_output() as captured: trainer.fit(retrain_nn, train_loader, train_loader)
 
     retrain_pred_train = retrain_nn(X_train_change)
@@ -127,12 +155,15 @@ def extract_grad(X, full_nn):
     output: n x (# network params) matrix
     """
     grads = []
-    n, p = X.shape
+    n = X.shape[0]
     params_full = tuple(full_nn.parameters())
     flat_params, shape_info = flat_tensors(params_full)
     for i in range(n):
         # calculate the first order gradient wrt all parameters
-        yi = full_nn(X[i])
+        if len(X.shape) > 2:
+            yi = full_nn(X[[i]])
+        else:
+            yi = full_nn(X[i])
         this_grad = torch.autograd.grad(yi, params_full, create_graph=True)
         flat_this_grad, _ = flat_tensors(this_grad)
         grads.append(flat_this_grad)
@@ -161,7 +192,7 @@ def lazy_train_cv(full_nn, X_train_change, X_test_change, y_train, hidden_layers
     kf = KFold(n_splits=5, shuffle=True)
     errors = []
     grads, flat_params, shape_info = extract_grad(X_train_change, full_nn)
-    print(grads.shape)
+    #print(grads.shape)
 
     for lam in lam_path:
         for train, test in kf.split(X_train_change):
@@ -184,7 +215,8 @@ Experiment wrapped for faster simulations
 """
 
 def vi_experiment_wrapper(X, y, network_width,  ix=None, exp_iter=1, lambda_path=np.logspace(0, 2, 10),
-                          lam='cv', lazy_init='train', do_retrain=True):
+                          lam='cv', lazy_init='train', do_retrain=True, include_linear=False, include_rf=False,
+                          early_stop = False, max_epochs=100):
     n, p = X.shape
     if ix is None:
         ix = np.arange(p)
@@ -206,6 +238,15 @@ def vi_experiment_wrapper(X, y, network_width,  ix=None, exp_iter=1, lambda_path
     results.append(['all', 'full model', full_time, 0,
                     nn.MSELoss()(full_nn(X_train), y_train).item(),
                     nn.MSELoss()(full_pred_test, y_test).item()])
+
+    if include_linear:
+        lm = LinearRegression()
+        lm.fit(X_train.detach().numpy(), y_train.detach().numpy())
+
+    if include_rf:
+        rf = RandomForestRegressor()
+        rf.fit(X_train.detach().numpy(), y_train.detach().numpy())
+
     for j in ix:
         varr = 'X' + str(j + 1)
         # DROPOUT
@@ -283,5 +324,162 @@ def vi_experiment_wrapper(X, y, network_width,  ix=None, exp_iter=1, lambda_path
 
             results.append([varr, 'retrain', retrain_time, vi_retrain, loss_rt_train, loss_rt_test, se])
 
+        # Early stopping
+        if early_stop:
+            t0 = time.time()
+            retrain_pred_train, retrain_pred_test = fake_retrain(p, full_nn, hidden_layers, j, X_train_change, y_train,
+                                                                 X_test_change, tol=tol, max_epochs=max_epochs)
+            retrain_time = time.time() - t0
+            vi_retrain = nn.MSELoss()(retrain_pred_test, y_test).item() - nn.MSELoss()(y_test, full_pred_test).item()
+            loss_rt_test = nn.MSELoss()(retrain_pred_test, y_test).item()
+            loss_rt_train = nn.MSELoss()(retrain_pred_train, y_train).item()
+
+            # variance
+            eps_j = ((y_test - retrain_pred_test) ** 2).detach().numpy().reshape(1, -1)
+            eps_full = ((y_test - full_pred_test) ** 2).detach().numpy().reshape(1, -1)
+            se = np.sqrt(np.var(eps_j - eps_full)/y_test.shape[0])
+
+            results.append([varr, 'early_stopping', retrain_time, vi_retrain, loss_rt_train, loss_rt_test, se])
+
+        # LINEAR RETRAIN
+        if include_linear:
+            t0 = time.time()
+            lmj = LinearRegression()
+            lmj.fit(X_train_change.detach().numpy(), y_train.detach().numpy())
+            #retrain_pred_train, retrain_pred_test = retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=tol)
+            lin_time = time.time() - t0
+            vi_linear = mse(lmj.predict(X_test_change.detach().numpy()), y_test.detach().numpy()) - mse(lm.predict(X_test.detach().numpy()), y_test.detach().numpy())
+            loss_rt_test = mse(lmj.predict(X_test_change.detach().numpy()), y_test.detach().numpy())
+            loss_rt_train = mse(lmj.predict(X_train_change.detach().numpy()), y_train.detach().numpy())
+            results.append([varr, 'ols', lin_time, vi_linear, loss_rt_train, loss_rt_test])
+
+        # LINEAR RETRAIN
+        if include_rf:
+            t0 = time.time()
+            rfj = RandomForestRegressor()
+            rfj.fit(X_train_change.detach().numpy(), y_train.detach().numpy())
+            #retrain_pred_train, retrain_pred_test = retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=tol)
+            lin_time = time.time() - t0
+            vi_linear = mse(rfj.predict(X_test_change.detach().numpy()), y_test.detach().numpy()) - mse(rf.predict(X_test.detach().numpy()), y_test.detach().numpy())
+            loss_rt_test = mse(rfj.predict(X_test_change.detach().numpy()), y_test.detach().numpy())
+            loss_rt_train = mse(rfj.predict(X_train_change.detach().numpy()), y_train.detach().numpy())
+            results.append([varr, 'rf', lin_time, vi_linear, loss_rt_train, loss_rt_test])
+
     df = pd.DataFrame(results, columns=['variable', 'method', 'time', 'vi', 'train_loss', 'test_loss', 'se'])
     return df
+
+from matplotlib import pyplot as plt
+from matplotlib.patches import Rectangle
+from matplotlib.lines import Line2D
+
+def boxplot_2d(x,y, ax, co='g', whis=1.5, method=''):
+    xlimits = [np.percentile(x, q) for q in (25, 50, 75)]
+    ylimits = [np.percentile(y, q) for q in (25, 50, 75)]
+
+    ##the box
+    box = Rectangle(
+        (xlimits[0],ylimits[0]),
+        (xlimits[2]-xlimits[0]),
+        (ylimits[2]-ylimits[0]),
+        ec = co,
+        color = co,
+        zorder=0
+    )
+    ax.add_patch(box)
+
+    ##the x median
+    vline = Line2D(
+        [xlimits[1],xlimits[1]],[ylimits[0],ylimits[2]],
+        color=co,
+        zorder=1
+    )
+    ax.add_line(vline)
+
+    ##the y median
+    hline = Line2D(
+        [xlimits[0],xlimits[2]],[ylimits[1],ylimits[1]],
+        color=co,
+        zorder=1
+    )
+    ax.add_line(hline)
+
+    ##the central point
+    ax.plot([xlimits[1]],[ylimits[1]], color=co, marker='o', label=method)
+
+    ##the x-whisker
+    ##defined as in matplotlib boxplot:
+    ##As a float, determines the reach of the whiskers to the beyond the
+    ##first and third quartiles. In other words, where IQR is the
+    ##interquartile range (Q3-Q1), the upper whisker will extend to
+    ##last datum less than Q3 + whis*IQR). Similarly, the lower whisker
+    ####will extend to the first datum greater than Q1 - whis*IQR. Beyond
+    ##the whiskers, data are considered outliers and are plotted as
+    ##individual points. Set this to an unreasonably high value to force
+    ##the whiskers to show the min and max values. Alternatively, set this
+    ##to an ascending sequence of percentile (e.g., [5, 95]) to set the
+    ##whiskers at specific percentiles of the data. Finally, whis can
+    ##be the string 'range' to force the whiskers to the min and max of
+    ##the data.
+    iqr = xlimits[2]-xlimits[0]
+
+    ##left
+    left = np.min(x[x > xlimits[0]-whis*iqr])
+    whisker_line = Line2D(
+        [left, xlimits[0]], [ylimits[1],ylimits[1]],
+        color = co,
+        zorder = 1
+    )
+    ax.add_line(whisker_line)
+    whisker_bar = Line2D(
+        [left, left], [ylimits[0],ylimits[2]],
+        color = co,
+        zorder = 1
+    )
+    ax.add_line(whisker_bar)
+
+    ##right
+    right = np.max(x[x < xlimits[2]+whis*iqr])
+    whisker_line = Line2D(
+        [right, xlimits[2]], [ylimits[1],ylimits[1]],
+        color = co,
+        zorder = 1
+    )
+    ax.add_line(whisker_line)
+    whisker_bar = Line2D(
+        [right, right], [ylimits[0],ylimits[2]],
+        color = co,
+        zorder = 1
+    )
+    ax.add_line(whisker_bar)
+
+    ##the y-whisker
+    iqr = ylimits[2]-ylimits[0]
+
+    ##bottom
+    bottom = np.min(y[y > ylimits[0]-whis*iqr])
+    whisker_line = Line2D(
+        [xlimits[1],xlimits[1]], [bottom, ylimits[0]],
+        color = co,
+        zorder = 1
+    )
+    ax.add_line(whisker_line)
+    whisker_bar = Line2D(
+        [xlimits[0],xlimits[2]], [bottom, bottom],
+        color = co,
+        zorder = 1
+    )
+    ax.add_line(whisker_bar)
+
+    ##top
+    top = np.max(y[y < ylimits[2]+whis*iqr])
+    whisker_line = Line2D(
+        [xlimits[1],xlimits[1]], [top, ylimits[2]],
+        color = co,
+        zorder = 1
+    )
+    ax.add_line(whisker_line)
+    whisker_bar = Line2D(
+        [xlimits[0],xlimits[2]], [top, top],
+        color = co,
+        zorder = 1
+    )

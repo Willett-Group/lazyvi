@@ -72,3 +72,32 @@ def generate_non_additive_6(n=5000, rho=.5):
     X = torch.tensor(X, dtype=torch.float32)
     Y = torch.tensor(Y, dtype=torch.float32).reshape(-1,1)
     return X, Y
+
+def generate_floodgate_sims(n=1100,p=1000, rho=.3, s=30, amplitude=5):
+    #Sigma = pd.read_csv('../../floodgate/vignettes/Sigma.csv').values
+    # make AR(1) covariance
+    S = np.zeros((p, p))
+    for i in range(p):
+        S[i, i:] = rho ** np.arange(p - i)
+        for j in range(i):
+            S[i, j] = S[j, i]
+
+    ## choose non-null varaibles randomly
+    S_star = np.random.choice(np.arange(p), s, replace=False)
+    beta = np.zeros(p)
+    beta[S_star] = np.random.choice([-1, 1], s) * amplitude / np.sqrt(n)
+
+    ## generate the covaraites X
+    X = np.random.multivariate_normal(np.zeros(p), S, size=n)
+    ## Generate the response Y from a linear model
+
+    Y = X @ beta + np.random.normal(size=n)
+    X = torch.tensor(X, dtype=torch.float32)
+    Y = torch.tensor(Y, dtype=torch.float32).view(-1, 1)
+    return X, Y, beta
+
+def generate_williamson_sims(n,p=4):
+    X = np.random.normal(size=(n,p))
+    beta = [2.5, 3.5] + [0]*(p-2)
+    y = (X@beta + np.random.normal(size=n) > 0).astype(int)
+    return X, y
