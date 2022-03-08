@@ -19,53 +19,6 @@ import tqdm
 
 
 """
-Network 
-"""
-class NN4vi(pl.LightningModule):
-
-    def __init__(self,
-                 input_dim: int,
-                 hidden_widths: list,
-                 output_dim: int,
-                 activation = nn.ReLU):
-        super().__init__()
-        structure = [input_dim] + list(hidden_widths) + [output_dim]
-        layers = []
-        for j in range(len(structure) - 1):
-            act = activation if j < len(structure) - 2 else nn.Identity
-            layers += [nn.Linear(structure[j], structure[j + 1]), act()]
-
-        self.net = nn.Sequential(
-            *layers
-        )
-
-    def forward(self, x):
-        # in lightning, forward defines the prediction/inference actions
-        return self.net(x)
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        return optimizer
-
-    def training_step(self, batch, batch_idx):
-        # training_step defined the train loop.
-        x, y = batch
-        y_hat = self.net(x)
-        loss = nn.MSELoss()(y_hat, y)
-        # Logging to TensorBoard by default
-        self.log("my_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        return loss
-
-    def validation_step(self, batch, batch_nb):
-        x, y = batch
-        loss = nn.MSELoss()(self.net(x), y)
-        self.log('val_loss', loss)
-        return loss
-
-
-
-
-"""
 VI helpers
 """
 def calculate_cvg(est, se, true_vi, level=.05):
@@ -98,7 +51,7 @@ def retrain(p, hidden_layers, j, X_train_change, y_train, X_test_change, tol=1e-
                                               torch.tensor(y_train, dtype=torch.float32).view(-1, 1))
     train_loader = DataLoader(trainset, batch_size=256)
 
-    trainer = pl.Trainer(callbacks=[early_stopping], max_epochs=10000)
+    trainer = pl.Trainer(callbacks=[early_stopping], max_epochs=100)
     with io.capture_output() as captured: trainer.fit(retrain_nn, train_loader, train_loader)
 
     retrain_pred_train = retrain_nn(X_train_change)
@@ -189,7 +142,7 @@ def lazy_predict(grads, flat_params, full_nn, hidden_layers, shape_info, X_train
 
 def lazy_train_cv(full_nn, X_train_change, X_test_change, y_train, hidden_layers,
                   lam_path=np.logspace(-3, 3, 20), file=False):
-    kf = KFold(n_splits=5, shuffle=True)
+    kf = KFold(n_splits=3, shuffle=True)
     errors = []
     grads, flat_params, shape_info = extract_grad(X_train_change, full_nn)
     #print(grads.shape)
