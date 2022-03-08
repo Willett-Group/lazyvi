@@ -1,9 +1,15 @@
 import torch
 import numpy as np
-import pandas as pd
 import random
+import pytorch_lightning as pl
+from torch.utils.data import DataLoader, random_split
+from typing import Optional
+from sklearn.model_selection import train_test_split
+from torchvision import datasets, transforms
+from torchvision.datasets import MNIST
+import os
 
-
+# Basic data generation
 def generate_linear_data(beta, sigma=0.1, N=5000, seed=1, corr=0.5):
     random.seed(seed)
     cov = [[1, corr], [corr, 1]]
@@ -36,7 +42,6 @@ def generate_logistic_data(beta, sigma=0.1, N=5000, seed=1, corr=0.5):
     Y = torch.tensor(Y, dtype=torch.float32).view(-1, 1)
     return X, Y
 
-
 def generate_WV(beta, m, V='random', sigma=0.1):
     p = len(beta)
     W = np.zeros((m, p))
@@ -60,7 +65,6 @@ def generate_2lnn_data(W, V, n, corr=0.5):
     Y = torch.tensor(torch.matmul(V, torch.relu(torch.matmul(W, X.T))).detach().numpy(),
                      dtype=torch.float32)
     return X, Y.reshape(-1, 1)
-
 
 def generate_non_additive_6(n=5000, rho=.5):
     p = 6
@@ -101,3 +105,106 @@ def generate_williamson_sims(n,p=4):
     beta = [2.5, 3.5] + [0]*(p-2)
     y = (X@beta + np.random.normal(size=n) > 0).astype(int)
     return X, y
+
+# Flexible data modules for more complicated/principled stuff
+class FlexDataModule(pl.LightningDataModule):
+    def __init__(self, X, y, seed=711, batch_size: int = 32):
+        super().__init__()
+        self.batch_size = batch_size
+        self.X = X
+        self.y = y
+        self.seed = seed
+
+    def setup(self, stage: Optional[str] = None) -> None:
+        X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size = 0.33, random_state=self.seed)
+        trainset = torch.utils.data.TensorDataset(
+        torch.tensor(X_train, dtype=torch.float32),
+        torch.tensor(y_train, dtype=torch.float32).view(-1,1))
+        n = X_train.shape[0]
+        n_train = int(np.floor(n*.8))
+        n_val = int(n - n_train)
+        self.train, self.val = random_split(trainset, [n_train, n_val])
+
+        self.test = torch.utils.data.TensorDataset(
+            torch.tensor(X_test, dtype=torch.float32),
+            torch.tensor(y_test, dtype=torch.float32).view(-1,1))
+
+    def train_dataloader(self):
+        return DataLoader(self.train, batch_size=self.batch_size)
+
+    def val_dataloader(self):
+        return DataLoader(self.val, batch_size=self.batch_size)
+
+    def test_dataloader(self):
+        return DataLoader(self.test, batch_size=self.batch_size)
+
+# MNIST data module with dropout functionality
+class MNISTDataModule(pl.LightningDataModule):
+    def __init__(self, dropout=None, chunk_size=0, batch_size=64):
+        super().__init__()
+        self.batch_size = batch_size
+        self.dropout = dropout
+        self.chunk_size = chunk_size
+
+    def prepare_data(self):
+        # download only
+        MNIST(os.getcwd(), train=True, download=True, transform=transforms.ToTensor())
+        MNIST(os.getcwd(), train=False, download=True, transform=transforms.ToTensor())
+
+    def setup(self, targets2keep=[3, 8], stage: Optional[str] = None):
+        # transform
+        #transform = transforms.Compose([transforms.Resize(14), transforms.ToTensor()])
+        transform = transforms.Compose([transforms.ToTensor()])
+        mnist_train = MNIST(os.getcwd(), train=True, download=False, transform=transform)
+        mnist_test = MNIST(os.getcwd(), train=False, download=False, transform=transform)
+
+        if self.dropout is not None:
+            if self.chunk_size > 0:
+                j, k = self.dropout
+                mnist_train.data[:, j:j+self.chunk_size, k:k+self.chunk_size] = 0
+                mnist_test.data[:, j:j+self.chunk_size, k:k+self.chunk_size] = 0
+            else:
+                for (j,k) in self.dropout:
+                    mnist_train.data[:, j, k] = 0
+                    mnist_test.data[:, j, k] = 0
+
+        # keep the relevant classes
+        ix_train = np.array([])
+        ix_test = np.array([])
+        for t in targets2keep:
+            ix_train = np.append(ix_train, np.where(mnist_train.targets == t)[0])
+            ix_test = np.append(ix_test, np.where(mnist_test.targets == t)[0])
+
+        #np.random.shuffle(ix_train)
+        #np.random.shuffle(ix_test)
+
+        mnist_train.data = mnist_train.data[ix_train]
+        mnist_test.data = mnist_test.data[ix_test]
+
+        y_train = mnist_train.targets[ix_train]
+        y_test = mnist_test.targets[ix_test]
+
+        mnist_train.targets = torch.tensor([1 if y == targets2keep[1] else 0 for y in y_train],
+                                           dtype=torch.float32).view(-1, 1)
+        mnist_test.targets = torch.tensor([1 if y == targets2keep[1] else 0 for y in y_test],
+                                          dtype=torch.float32).view(-1, 1)
+
+        # train/val split
+        n = mnist_train.data.shape[0]
+        n_train = int(np.floor(n * .8))
+        n_val = int(n - n_train)
+        mnist_train, mnist_val = random_split(mnist_train, [n_train, n_val])
+
+        # assign to use in dataloaders
+        self.train_dataset = mnist_train
+        self.val_dataset = mnist_val
+        self.test_dataset = mnist_test
+
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset, batch_size=self.batch_size)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_dataset, batch_size=self.batch_size)
+
+    def test_dataloader(self):
+        return DataLoader(self.test_dataset, batch_size=self.batch_size)
