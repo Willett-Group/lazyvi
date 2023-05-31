@@ -16,6 +16,12 @@ import time
 from IPython.utils import io
 from sklearn.ensemble import RandomForestRegressor
 import tqdm
+from sklearn.metrics import accuracy_score
+
+from matplotlib import pyplot as plt
+from matplotlib.patches import Rectangle
+from matplotlib.lines import Line2D
+
 
 
 """
@@ -34,7 +40,7 @@ def dropout(X, grp):
     X = np.array(X)
     N = X.shape[0]
     X_change = np.copy(X)
-    if type(grp)==int:
+    if type(grp) in [np.int64, int]:
         X_change[:, grp] = np.ones(N) * np.mean(X[:, grp])
     else:
         for j in grp:
@@ -320,10 +326,6 @@ def vi_experiment_wrapper(X, y, network_width,  ix=None, exp_iter=1, lambda_path
 
     df = pd.DataFrame(results, columns=['variable', 'method', 'time', 'vi', 'train_loss', 'test_loss', 'se'])
     return df
-
-from matplotlib import pyplot as plt
-from matplotlib.patches import Rectangle
-from matplotlib.lines import Line2D
 
 def boxplot_2d(x,y, ax, co='g', whis=1.5, method=''):
     xlimits = [np.percentile(x, q) for q in (25, 50, 75)]
